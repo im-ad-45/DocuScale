@@ -1,0 +1,4 @@
+fastembed>=0.4.0
+qdrant-client>=1.10.0
+pydantic>=2.6.0
+python-dotenv>=1.0.0
