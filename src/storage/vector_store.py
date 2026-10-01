@@ -70,6 +70,22 @@ class VectorStore:
             for p in result.points
         ]
 
+    def get_all_chunks(self) -> list[Chunk]:
+        """Scroll through the whole collection (used to build the BM25 index)."""
+        chunks: list[Chunk] = []
+        offset = None
+        while True:
+            points, offset = self._client.scroll(
+                self._settings.collection_name,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            chunks.extend(Chunk(chunk_id=str(p.id), **(p.payload or {})) for p in points)
+            if offset is None:
+                return chunks
+
     def close(self) -> None:
         """Release the on-disk lock so another process can open the store."""
         self._client.close()

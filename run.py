@@ -1,6 +1,7 @@
-"""Phase 1 sanity check: chunk -> embed -> store -> search."""
+"""Sanity check: chunk -> embed -> store -> hybrid retrieve (dense + BM25 + RRF) -> rerank."""
 from src.config import load_settings
 from src.ingestion.chunker import chunk_document
+from src.retrieval.hybrid import HybridHit, HybridRetriever
 from src.storage.vector_store import VectorStore
 
 DOCS: dict[str, str] = {
@@ -28,24 +29,41 @@ DOCS: dict[str, str] = {
         "often overnight in the refrigerator, which develops flavour and a chewy crumb. "
         "Baking in a preheated covered pot traps steam and produces a crisp, blistered crust."
     ),
+    "fatf": (
+        "FATF Recommendation 16, known as the travel rule, requires financial institutions "
+        "to pass originator and beneficiary information along with wire transfers. When a "
+        "payment crosses borders, the sending bank must attach the payer's name, account "
+        "number and address, and the receiving bank must check that the details are present. "
+        "The rule helps investigators trace funds moved between institutions and jurisdictions."
+    ),
 }
 
 QUERIES: list[tuple[str, str]] = [
+    ("What does FATF Recommendation 16 require for wire transfers?", "fatf"),
     ("How do banks confirm who their customers are?", "kyc"),
     ("nearest neighbour search over embeddings", "vector-db"),
-    ("why does my starter need feeding?", "sourdough"),
 ]
 
 
-def main() -> None:
-    settings = load_settings()
-    # Small windows so this tiny corpus yields several overlapping chunks per doc.
-    settings = settings.model_copy(update={"chunk_size": 40, "chunk_overlap": 10})
+def show(label: str, hits: list[HybridHit]) -> None:
+    """Print one result list with the per-stage evidence."""
+    print(f"  {label}")
+    for i, h in enumerate(hits, start=1):
+        rr = f"{h.rerank_score:.2f}" if h.rerank_score is not None else "-"
+        print(
+            f"   {i}. [{h.chunk.doc_id}#{h.chunk.chunk_index}] "
+            f"dense={h.dense_rank} bm25={h.bm25_rank} rrf={h.rrf_score:.4f} rerank={rr}"
+        )
 
+
+def main() -> None:
+    # Small windows so this tiny corpus yields several overlapping chunks per doc.
+    settings = load_settings().model_copy(
+        update={"chunk_size": 40, "chunk_overlap": 10, "candidate_k": 10, "final_top_k": 3}
+    )
     store = VectorStore(settings)
     try:
         store.create_collection(recreate=True)
-
         chunks = [
             c
             for doc_id, text in DOCS.items()
@@ -53,17 +71,18 @@ def main() -> None:
                 text, doc_id, settings.chunk_size, settings.chunk_overlap, {"source": "demo"}
             )
         ]
-        print(f"Chunked {len(DOCS)} docs into {len(chunks)} chunks; upserting...")
-        print(f"Stored {store.upsert_documents(chunks)} chunks.\n")
+        print(f"Indexed {store.upsert_documents(chunks)} chunks from {len(DOCS)} docs.\n")
 
+        retriever = HybridRetriever(store, settings)
         for query, expected_doc in QUERIES:
-            hits = store.dense_search(query, top_k=3)
             print(f"Q: {query}")
-            for h in hits:
-                print(f"  {h.score:.3f}  [{h.chunk.doc_id}#{h.chunk.chunk_index}] {h.chunk.text[:70]}...")
-            assert hits[0].chunk.doc_id == expected_doc, f"expected top hit from {expected_doc}"
+            show("RRF only:", retriever.retrieve(query, rerank=False))
+            reranked = retriever.retrieve(query)
+            show("RRF + cross-encoder:", reranked)
+            top_docs = [r.chunk.doc_id for r in reranked[:2]]
+            assert expected_doc in top_docs, f"expected {expected_doc} in {top_docs}"
             print()
-        print("Phase 1 sanity checks passed.")
+        print("Sanity checks passed.")
     finally:
         store.close()
 
