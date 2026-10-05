@@ -1,7 +1,21 @@
-"""Sanity check: chunk -> embed -> store -> hybrid retrieve (dense + BM25 + RRF) -> rerank."""
+"""End-to-end check: ingest -> [HyDE] -> hybrid retrieve -> rerank -> grounded answer.
+
+Usage:  python run.py            (HyDE per DOCUSCALE_USE_HYDE, default off)
+        python run.py --hyde     (force HyDE on)
+"""
+import argparse
+import logging
+import sys
+import textwrap
+
+from litellm.exceptions import AuthenticationError
+
 from src.config import load_settings
+from src.generation.llm import LiteLLMClient
+from src.generation.synthesizer import Synthesizer
 from src.ingestion.chunker import chunk_document
-from src.retrieval.hybrid import HybridHit, HybridRetriever
+from src.retrieval.hyde import HydeExpander
+from src.retrieval.hybrid import HybridRetriever
 from src.storage.vector_store import VectorStore
 
 DOCS: dict[str, str] = {
@@ -38,30 +52,32 @@ DOCS: dict[str, str] = {
     ),
 }
 
-QUERIES: list[tuple[str, str]] = [
+# (question, doc that must be cited) -- None means the corpus can't answer: expect a refusal.
+CASES: list[tuple[str, str | None]] = [
     ("What does FATF Recommendation 16 require for wire transfers?", "fatf"),
-    ("How do banks confirm who their customers are?", "kyc"),
-    ("nearest neighbour search over embeddings", "vector-db"),
+    ("How do lenders make sure applicants really are who they claim to be?", "kyc"),
+    ("How do HNSW indexes find nearest vectors quickly?", "vector-db"),
+    ("Who won the 2018 FIFA World Cup?", None),
 ]
 
 
-def show(label: str, hits: list[HybridHit]) -> None:
-    """Print one result list with the per-stage evidence."""
-    print(f"  {label}")
-    for i, h in enumerate(hits, start=1):
-        rr = f"{h.rerank_score:.2f}" if h.rerank_score is not None else "-"
-        print(
-            f"   {i}. [{h.chunk.doc_id}#{h.chunk.chunk_index}] "
-            f"dense={h.dense_rank} bm25={h.bm25_rank} rrf={h.rrf_score:.4f} rerank={rr}"
-        )
+def main() -> int:
+    parser = argparse.ArgumentParser(description="DocuScale end-to-end check")
+    parser.add_argument("--hyde", action="store_true", help="force HyDE query expansion on")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.WARNING)
 
-
-def main() -> None:
+    base = load_settings()
     # Small windows so this tiny corpus yields several overlapping chunks per doc.
-    settings = load_settings().model_copy(
-        update={"chunk_size": 40, "chunk_overlap": 10, "candidate_k": 10, "final_top_k": 3}
+    settings = base.model_copy(
+        update={
+            "chunk_size": 40, "chunk_overlap": 10, "candidate_k": 10, "final_top_k": 3,
+            "use_hyde": args.hyde or base.use_hyde,
+        }
     )
+    llm = LiteLLMClient(settings)
     store = VectorStore(settings)
+    failures = 0
     try:
         store.create_collection(recreate=True)
         chunks = [
@@ -71,21 +87,43 @@ def main() -> None:
                 text, doc_id, settings.chunk_size, settings.chunk_overlap, {"source": "demo"}
             )
         ]
-        print(f"Indexed {store.upsert_documents(chunks)} chunks from {len(DOCS)} docs.\n")
+        print(f"Indexed {store.upsert_documents(chunks)} chunks | HyDE: {settings.use_hyde} "
+              f"| LLM: {settings.llm_model}\n")
 
-        retriever = HybridRetriever(store, settings)
-        for query, expected_doc in QUERIES:
-            print(f"Q: {query}")
-            show("RRF only:", retriever.retrieve(query, rerank=False))
-            reranked = retriever.retrieve(query)
-            show("RRF + cross-encoder:", reranked)
-            top_docs = [r.chunk.doc_id for r in reranked[:2]]
-            assert expected_doc in top_docs, f"expected {expected_doc} in {top_docs}"
-            print()
-        print("Sanity checks passed.")
+        retriever = HybridRetriever(store, settings, hyde=HydeExpander(llm, settings))
+        synthesizer = Synthesizer(llm, settings)
+
+        for question, expected in CASES:
+            result = retriever.retrieve(question)
+            answer = synthesizer.answer(question, result.hits)
+
+            print(f"Q: {question}")
+            if result.hyde_passage:
+                print(textwrap.fill(f"HyDE passage: {result.hyde_passage}", 90, initial_indent="  ",
+                                    subsequent_indent="    "))
+            print("  Retrieved: " + ", ".join(
+                f"{h.chunk.doc_id}#{h.chunk.chunk_index}" for h in result.hits))
+            print(textwrap.fill(f"A: {answer.answer}", 90, initial_indent="  ",
+                                subsequent_indent="     "))
+            print(f"  cited={answer.citations} unknown={answer.unknown_citations} "
+                  f"grounded={answer.grounded} refused={answer.refused}")
+
+            if expected is None:
+                ok = answer.refused
+            else:
+                ok = answer.grounded and expected in {c.rsplit("#", 1)[0] for c in answer.citations}
+            failures += not ok
+            print(f"  -> {'PASS' if ok else 'FAIL'}\n")
+    except AuthenticationError:
+        print("LLM authentication failed. Set the provider key in .env "
+              "(e.g. GROQ_API_KEY) or point DOCUSCALE_LLM_MODEL at a local Ollama model.")
+        return 2
     finally:
         store.close()
 
+    print("All checks passed." if not failures else f"{failures} check(s) failed.")
+    return 1 if failures else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
