@@ -1,15 +1,16 @@
 # DocuScale
 
-> **A production-oriented local document retrieval foundation built for scalable semantic search — without cloud APIs, API keys, or heavyweight AI frameworks.**
+> **A local-first hybrid RAG engine: BM25 + dense retrieval, cross-encoder reranking, optional HyDE query expansion, and citation-audited answer generation — built without orchestration frameworks.**
 
-**Phase 2 Complete:** Ingestion → Token-Aware Chunking → Local Embedding → Persistent Vector Indexing → BM25 Sparse Search → Reciprocal Rank Fusion (RRF) → Cross-Encoder Reranking
+**Phase 3 Complete:** Ingestion → Chunking → Local Embedding → Qdrant → [HyDE] → BM25 ∥ Dense → RRF → Cross-Encoder Reranking → Grounded Synthesis with Citation Audit
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![FastEmbed](https://img.shields.io/badge/Embeddings-FastEmbed-ONNX)](https://github.com/qdrant/fastembed)
+[![FastEmbed](https://img.shields.io/badge/Embeddings-FastEmbed%20%7C%20ONNX-0A7EA4)](https://github.com/qdrant/fastembed)
 [![Qdrant](https://img.shields.io/badge/Vector%20DB-Qdrant-FF4F64)](https://qdrant.tech/)
 [![Pydantic](https://img.shields.io/badge/Config-Pydantic%20v2-E92063)](https://docs.pydantic.dev/)
 [![Cross-Encoder](https://img.shields.io/badge/Reranker-Cross--Encoder%20%7C%20FastEmbed-2E8B57)](https://github.com/qdrant/fastembed)
-[![Status](https://img.shields.io/badge/Status-Phase%202%20Complete-success)](#roadmap)
+[![LiteLLM](https://img.shields.io/badge/LLM-LiteLLM-6B46C1)](https://github.com/BerriAI/litellm)
+[![Status](https://img.shields.io/badge/Status-Phase%203%20Complete-success)](#roadmap)
 
 **Repository:** [github.com/im-ad-45/DocuScale](https://github.com/im-ad-45/DocuScale)
 
@@ -17,204 +18,134 @@
 
 ## Overview
 
-**DocuScale** is a modular document-ingestion and semantic-retrieval pipeline designed around a simple principle:
+DocuScale is a modular retrieval-augmented generation pipeline. **Retrieval runs entirely on the local machine** — ONNX embeddings, on-disk Qdrant, in-memory BM25, and a local cross-encoder, with no embedding API and no PyTorch/CUDA. **Generation is provider-agnostic**: any model supported by LiteLLM (Groq, OpenAI, local Ollama, ...) is selected through environment variables.
 
-> Keep the retrieval foundation local, lightweight, deterministic, and independent of external AI APIs.
+Phase 3 builds on the Phase 2 hybrid retriever with:
 
-Phase 2 extends the Phase 1 ingestion-to-vector-search foundation into a **hybrid, multi-stage retrieval pipeline**. Dense semantic search and sparse BM25 matching run in parallel, their ranked results are merged using Reciprocal Rank Fusion (RRF), and the resulting candidate set is refined by a local Cross-Encoder reranker.
-
-```text
-                         DocuScale — Phase 2
-┌────────────────────────────────────────────────────────────────────────────┐
-│                                                                            │
-│  Documents                                                                 │
-│      │                                                                     │
-│      ▼                                                                     │
-│  ┌─────────────────────┐                                                   │
-│  │ Token-Aware Chunker │                                                   │
-│  │                     │                                                   │
-│  │ Sliding Window      │                                                   │
-│  │ + Configurable      │                                                   │
-│  │   Overlap           │                                                   │
-│  └──────────┬──────────┘                                                   │
-│             │                                                             │
-│             │ Query                                                         │
-│             ▼                                                             │
-│  ┌─────────────────────┐                                                   │
-│  │  Parallel Retrieval │                                                   │
-│  └──────────┬──────────┘                                                   │
-│             │                                                             │
-│       ┌─────┴─────────────────────┐                                       │
-│       │                           │                                       │
-│       ▼                           ▼                                       │
-│  ┌──────────────────┐       ┌──────────────────┐                          │
-│  │ Dense Retrieval  │       │ Sparse Retrieval │                          │
-│  │                  │       │                  │                          │
-│  │ FastEmbed        │       │ BM25             │                          │
-│  │ BGE Embeddings   │       │ rank_bm25        │                          │
-│  │ Quantized ONNX   │       │ Exact Tokens     │                          │
-│  └────────┬─────────┘       └────────┬─────────┘                          │
-│           │                          │                                    │
-│           ▼                          ▼                                    │
-│  ┌──────────────────┐       ┌──────────────────┐                          │
-│  │ Local Qdrant     │       │ BM25 Ranked      │                          │
-│  │ Vector Search    │       │ Candidates       │                          │
-│  └────────┬─────────┘       └────────┬─────────┘                          │
-│           │                          │                                    │
-│           └──────────────┬───────────┘                                    │
-│                          ▼                                                │
-│               ┌─────────────────────┐                                     │
-│               │ Reciprocal Rank     │                                     │
-│               │ Fusion (RRF)        │                                     │
-│               │ k = 60              │                                     │
-│               └──────────┬──────────┘                                     │
-│                          │ Top Candidates                                  │
-│                          ▼                                                │
-│               ┌─────────────────────┐                                     │
-│               │ Cross-Encoder       │                                     │
-│               │ Reranker            │                                     │
-│               │ FastEmbed / ONNX    │                                     │
-│               │ Local CPU           │                                     │
-│               └──────────┬──────────┘                                     │
-│                          │                                                │
-│                          ▼                                                │
-│                    Final Top-K Chunks                                     │
-│                                                                            │
-└────────────────────────────────────────────────────────────────────────────┘
-```
+- **HyDE query expansion** (optional): an LLM drafts a hypothetical answer passage to bridge vocabulary gaps on the dense path.
+- **Grounded answer synthesis**: answers must cite `[doc_id#chunk_index]`; every citation is mechanically checked against the retrieved chunks, and out-of-domain questions are refused through a deterministic string contract.
 
 ---
 
-## Key Architectural Features
+## Architecture
 
-### Local-first embeddings with FastEmbed
-
-DocuScale uses the quantized ONNX version of:
+### Ingestion
 
 ```text
-BAAI/bge-small-en-v1.5
+ Documents
+     │
+     ▼
+ Token-aware chunker ── sliding window, configurable overlap, deterministic chunk IDs
+     │
+     ▼
+ FastEmbed (BAAI/bge-small-en-v1.5, ONNX) ── dense vectors
+     │
+     ▼
+ Local Qdrant (./qdrant_data) ── vectors + chunk payload, cosine distance
+     │
+     └──▶ BM25 index ── built in memory from the stored chunks (refresh_index() after ingesting)
 ```
 
-through **FastEmbed**.
-
-This provides:
-
-- Local embedding generation
-- CPU-friendly ONNX inference
-- No PyTorch dependency
-- No CUDA requirement
-- No external embedding API
-- No API keys
-- No per-token embedding charges
-- Lower runtime overhead than a typical PyTorch-based embedding stack
-
-The embedding model runs entirely on the machine executing DocuScale.
-
-### Local Qdrant
-
-Vector storage is provided by `qdrant-client` in local embedded/on-disk mode:
+### Query pipeline
 
 ```text
-./qdrant_data
+                                 User Query
+                                     │
+                 ┌───────────────────┬───────────────────┐
+                 ▼                                       ▼
+ ┌───────────────────────────────┐                       │
+ │ HyDE Expander (optional)      │                       │
+ │ LLM drafts a hypothetical     │                       │ raw query, untouched
+ │ answer passage. On failure,   │                       │
+ │ falls back to the raw query   │                       │
+ └───────────────────────────────┘                       │
+                 │                                       │
+                 ▼                                       ▼
+ ┌───────────────────────────────┐       ┌───────────────────────────────┐
+ │ Dense retrieval               │       │ Sparse retrieval              │
+ │ embeds raw query + passage    │       │ BM25 (rank_bm25)              │
+ │ FastEmbed → Qdrant (cosine)   │       │ searches the raw query only   │
+ └───────────────────────────────┘       └───────────────────────────────┘
+                 │                                       │
+                 └───────────────────┬───────────────────┘
+                                     ▼
+                     ┌───────────────────────────────┐
+                     │ Reciprocal Rank Fusion        │
+                     │ RRF, k = 60                   │
+                     └───────────────────────────────┘
+                                     │
+                                     ▼
+                     ┌───────────────────────────────┐
+                     │ Cross-Encoder reranking       │
+                     │ FastEmbed / ONNX, local CPU   │
+                     │ scores (raw query, chunk)     │
+                     └───────────────────────────────┘
+                                     │  RetrievalResult(hits, hyde_passage)
+                                     ▼
+                     ┌───────────────────────────────┐
+                     │ Synthesizer                   │
+                     │ source-restricted prompt      │
+                     │ ChatModel → LiteLLM           │
+                     └───────────────────────────────┘
+                                     │
+                                     ▼
+                     ┌───────────────────────────────┐
+                     │ Citation audit                │
+                     │ [doc#n] checked against the   │
+                     │ retrieved chunk labels        │
+                     │ exact-string refusal check    │
+                     └───────────────────────────────┘
+                                     │
+                                     ▼
+                     ┌───────────────────────────────┐
+                     │ Answer                        │
+                     │ grounded, refused, citations  │
+                     │ unknown_citations, sources    │
+                     └───────────────────────────────┘
 ```
 
-This means the vector search path does **not** require a separately deployed Qdrant server.
+- **Dual path.** Dense and sparse retrieval run on different query strings when HyDE is on; with HyDE off both receive the raw query.
+- **Single contract between stages.** `HybridRetriever.retrieve()` returns a `RetrievalResult` (`.hits`, `.hyde_passage`); the `Synthesizer` consumes `.hits`.
 
-The vector index is persisted locally and can be reused between executions.
+---
 
-### Hybrid Retrieval
+## Key Features
 
-Phase 2 combines two complementary retrieval signals:
+| Capability | Behavior |
+|---|---|
+| **Local embeddings** | `BAAI/bge-small-en-v1.5` via FastEmbed (ONNX, CPU). No embedding API, no API keys. |
+| **Local vector store** | `qdrant-client` in embedded on-disk mode (`./qdrant_data`); no Qdrant server. Cosine distance, persistent across runs. |
+| **Hybrid retrieval** | Dense semantic search + BM25 lexical search, merged with Reciprocal Rank Fusion (`k = 60`). RRF operates on ranks, so the two score scales never need to be compared. |
+| **Cross-encoder reranking** | Fused shortlist is rescored on (raw query, chunk) pairs with a local FastEmbed cross-encoder (`BAAI/bge-reranker-base` by default). |
+| **HyDE (optional)** | Hypothetical answer passage embedded for the dense path only. Enabled with `--hyde` or `DOCUSCALE_USE_HYDE=true`. |
+| **Provider-agnostic LLM layer** | A single-method `ChatModel` Protocol, implemented by a LiteLLM wrapper. Swap Groq / OpenAI / Ollama through config only. |
+| **Citation audit** | `Synthesizer` extracts `[doc#n]` tags from the answer and verifies each against the retrieved chunk labels. |
+| **Deterministic refusal** | The model must reply with an exact configured sentence when sources are insufficient; refusal is detected by string comparison, not LLM self-judgment. Empty retrieval skips the LLM call. |
+| **No orchestration framework** | No LangChain / LlamaIndex / CrewAI. Each stage is an explicit, individually testable module. |
 
-```text
-                 Query
-                   │
-          ┌────────┴────────┐
-          │                 │
-          ▼                 ▼
-     Dense Search       BM25 Search
-          │                 │
- Semantic Similarity    Exact Tokens
-          │                 │
-          └────────┬────────┘
-                   ▼
-                  RRF
-                   │
-                   ▼
-             Top Candidates
-```
+### HyDE design decisions
 
-**Dense retrieval** captures semantic similarity, making it useful when the query and document express the same concept using different wording.
+| Decision | Rationale |
+|---|---|
+| Passage is embedded **only on the dense path** | A hypothetical answer is written in document vocabulary, which improves semantic recall. |
+| BM25 receives the **untouched raw query** | LLM-generated text would inject unrequested terms into lexical matching (keyword drift). |
+| Raw query is **prepended** to the passage before embedding | Anchors the vector to the user's intent if the LLM drifts off-topic. |
+| Reranker scores against the **raw query** | Final relevance is judged against what the user actually asked. |
+| LLM failure **falls back to standard retrieval** | HyDE errors (rate limits, timeouts) are logged at `WARNING` and never fail the request. `RetrievalResult.hyde_passage` is `None` in that case. |
 
-**BM25 sparse retrieval** captures exact lexical overlap, making it useful for identifiers, product names, error codes, acronyms, technical terms, and other token-sensitive queries.
+### Grounding contract
 
-The two ranked candidate lists are blended using **Reciprocal Rank Fusion (RRF)** rather than attempting to directly compare their different score scales.
+`Synthesizer.answer()` returns an `Answer`:
 
-The RRF score is:
+| Field | Meaning |
+|---|---|
+| `grounded` | Not refused, cites at least one real source, and cites no unknown source. |
+| `refused` | The model returned the configured refusal sentence (or retrieval was empty). |
+| `citations` | Cited labels that exist in the retrieved context. |
+| `unknown_citations` | Cited labels that were **not** in the retrieved context (hallucinated). |
+| `sources` | The chunks behind `citations`. |
 
-```text
-RRF_Score(d) = Σ 1 / (k + r(d))
-```
-
-with:
-
-```text
-k = 60
-```
-
-where `r(d)` is the rank of document/chunk `d` in each retrieval result list.
-
-### Local Cross-Encoder Reranking
-
-After hybrid retrieval and RRF fusion, the highest-value candidate set is passed through a local **Cross-Encoder reranker** using FastEmbed.
-
-The reranker uses a quantized ONNX model from the BGE reranker family and scores each query-document pair directly:
-
-```text
-Query + Candidate Chunk
-          │
-          ▼
-   Cross-Encoder Model
-          │
-          ▼
-   Relevance Score
-          │
-          ▼
-     Final Ranking
-```
-
-The reranking stage is designed to run on **local CPU inference without PyTorch or CUDA**.
-
-This creates a multi-stage retrieval architecture in which inexpensive retrieval stages provide broad candidate recall, while the Cross-Encoder performs a more targeted relevance assessment on the smaller candidate set.
-
-### No unnecessary orchestration framework
-
-The implementation intentionally does not introduce LangChain, CrewAI, or similar orchestration layers.
-
-The core retrieval pipeline remains explicit:
-
-```text
-Chunk
-  ↓
-Embed + Index
-  ↓
-Dense + BM25 Retrieval
-  ↓
-RRF
-  ↓
-Cross-Encoder Reranking
-  ↓
-Top-K
-```
-
-This keeps the retrieval infrastructure:
-
-- Lightweight
-- Easy to inspect
-- Easy to debug
-- Easy to benchmark
-- Easy to extend
-- Free from unnecessary framework overhead
+The audit verifies that citations are **real**, not that a sentence is logically entailed by its cited chunk. See [Known Limitations](#known-limitations).
 
 ---
 
@@ -222,380 +153,263 @@ This keeps the retrieval infrastructure:
 
 | Component | Technology | Purpose |
 |---|---|---|
-| Language | Python 3.10+ | Application/runtime |
-| Embeddings | FastEmbed | Local embedding inference |
-| Embedding Model | `BAAI/bge-small-en-v1.5` | Semantic vector generation |
-| Inference | Quantized ONNX | Lightweight CPU inference |
-| Vector Store | Qdrant Client | Local vector persistence/search |
-| Similarity | Cosine | Semantic similarity metric |
-| Configuration | Pydantic v2 | Typed configuration/data schemas |
-| Environment Config | pydantic-settings | `.env` configuration |
-| Chunking | Custom token-aware sliding window | Document segmentation |
-| Sparse Search | `rank_bm25` | BM25 lexical/token matching |
-| Rank Aggregation | Reciprocal Rank Fusion (RRF) | Combines dense and sparse rankings with `k=60` |
-| Reranker | FastEmbed Cross-Encoder | Local query-document relevance scoring via quantized ONNX |
+| Language | Python 3.10+ | Runtime |
+| Embeddings | FastEmbed, `BAAI/bge-small-en-v1.5` | Local ONNX dense embeddings |
+| Vector store | `qdrant-client` (local mode) | Persistent vector storage and cosine search |
+| Sparse search | `rank_bm25` | BM25 lexical matching |
+| Rank fusion | Reciprocal Rank Fusion, `k = 60` | Merges dense and sparse rankings |
+| Reranker | FastEmbed cross-encoder (`BAAI/bge-reranker-base`) | Local query–chunk relevance scoring |
+| Query expansion | HyDE (`src/retrieval/hyde.py`) | LLM-drafted hypothetical passage for dense retrieval |
+| LLM gateway | LiteLLM | Provider-neutral chat completions |
+| Generation | `ChatModel` Protocol + `Synthesizer` | Source-restricted answers with audited citations |
+| Configuration | Pydantic v2 + `python-dotenv` | Typed, immutable settings; `.env` loading |
+| Chunking | Custom sliding window | Overlapping chunks with traceable metadata |
 
 ---
 
-## Directory Structure
+## Project Layout
 
 ```text
 DocuScale/
-│
 ├── src/
-│   ├── config.py
-│   │
+│   ├── config.py                 # Pydantic v2 settings, prompt templates, env loading
 │   ├── ingestion/
-│   │   └── chunker.py
-│   │
-│   └── storage/
-│       └── vector_store.py
-│
-├── run.py
+│   │   └── chunker.py            # sliding-window chunker, deterministic chunk IDs
+│   ├── storage/
+│   │   └── vector_store.py       # local Qdrant manager: upsert, dense search, full scroll
+│   ├── retrieval/
+│   │   ├── bm25.py               # in-memory BM25 index
+│   │   ├── fusion.py             # Reciprocal Rank Fusion
+│   │   ├── reranker.py           # FastEmbed cross-encoder reranker
+│   │   ├── hyde.py               # HyDE query expansion with failure fallback
+│   │   └── hybrid.py             # HybridRetriever -> RetrievalResult
+│   └── generation/
+│       ├── llm.py                # ChatModel Protocol + LiteLLM client
+│       └── synthesizer.py        # grounded synthesis, citation audit, refusal handling
+├── run.py                        # end-to-end verification entry point
 ├── .env.example
 ├── requirements.txt
-│
-└── qdrant_data/
-    └── ...
+└── qdrant_data/                  # runtime-generated, git-ignored
 ```
-
-### `src/config.py`
-
-Central configuration and environment management using Pydantic v2 and `pydantic-settings`.
-
-### `src/ingestion/chunker.py`
-
-Contains the custom token-aware sliding-window text chunking implementation with configurable overlap.
-
-### `src/storage/vector_store.py`
-
-Handles local Qdrant vector storage and semantic similarity search.
-
-### `src/retrieval/__init__.py`
-
-Initializes the retrieval module.
-
-### `src/retrieval/hybrid.py`
-
-Contains the Phase 2 hybrid retrieval pipeline, combining BM25 sparse retrieval, dense Qdrant search, Reciprocal Rank Fusion, and Cross-Encoder reranking.
-
-### `run.py`
-
-Standalone Phase 1 verification entry point.
-
-It exercises the ingestion, embedding, persistence, and retrieval pipeline end-to-end.
-
-### `.env.example`
-
-Template for environment/configuration values used by the project.
-
-### `requirements.txt`
-
-Python dependencies required to install and run Phase 1.
-
-### `qdrant_data/`
-
-Local persistent Qdrant storage created by the application.
-
-> `qdrant_data/` is runtime-generated storage and should not be treated as source code.
 
 ---
 
 ## Requirements
 
-Before starting, ensure you have:
+- Python **3.10+** and `pip`
+- Internet access on first run for dependencies and model downloads
+- For generation, one of: a hosted-provider API key (e.g. Groq) **or** a running local [Ollama](https://ollama.com/) server
 
-- Python **3.10 or newer**
-- `pip`
-- A terminal
-- Internet access for the initial Python dependency/model download
-
-After the embedding model is available locally, inference itself does not require an external embedding API.
+Retrieval itself needs no API keys. The reranker (`bge-reranker-base`) is the largest model download (about 1 GB); a lighter alternative can be set with `DOCUSCALE_RERANKER_MODEL`.
 
 ---
 
 ## Installation
 
-### Windows — PowerShell
-
-#### 1. Clone the repository
+### Windows (PowerShell)
 
 ```powershell
 git clone https://github.com/im-ad-45/DocuScale.git
 cd DocuScale
-```
-
-#### 2. Create a virtual environment
-
-```powershell
 python -m venv .venv
-```
-
-#### 3. Activate the virtual environment
-
-```powershell
 .\.venv\Scripts\Activate.ps1
-```
-
-If PowerShell blocks script execution for the current session:
-
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
-```
-
-Then activate again:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-#### 4. Install dependencies
-
-```powershell
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-```
-
-#### 5. Initialize environment configuration
-
-```powershell
 Copy-Item .env.example .env
 ```
 
----
+If PowerShell blocks script execution, allow it for the current session and activate again:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+.\.venv\Scripts\Activate.ps1
+```
 
 ### Linux / macOS
-
-#### 1. Clone the repository
 
 ```bash
 git clone https://github.com/im-ad-45/DocuScale.git
 cd DocuScale
-```
-
-#### 2. Create a virtual environment
-
-```bash
 python3 -m venv .venv
-```
-
-#### 3. Activate the virtual environment
-
-```bash
 source .venv/bin/activate
-```
-
-#### 4. Install dependencies
-
-```bash
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-```
-
-#### 5. Initialize environment configuration
-
-```bash
 cp .env.example .env
 ```
 
 ---
 
-## Running DocuScale
+## Configuration
+
+Edit `.env`. Every field of `Settings` can be overridden as `DOCUSCALE_<FIELD_NAME>`.
+
+```env
+# LLM: any LiteLLM model string (tested: groq/openai/gpt-oss-20b)
+DOCUSCALE_LLM_MODEL=groq/openai/gpt-oss-20b
+GROQ_API_KEY=your-groq-key
+
+# HyDE query expansion (can also be forced per run with --hyde)
+DOCUSCALE_USE_HYDE=false
+```
+
+### LLM providers
+
+| Provider | `DOCUSCALE_LLM_MODEL` | Credentials |
+|---|---|---|
+| Groq | `groq/<model>` (tested: `groq/openai/gpt-oss-20b`) | `GROQ_API_KEY` |
+| Ollama (local) | `ollama_chat/<model>`, e.g. `ollama_chat/llama3.1` | none; set `DOCUSCALE_LLM_API_BASE=http://localhost:11434` |
+| OpenAI | `gpt-4o-mini` | `OPENAI_API_KEY` |
+
+`DOCUSCALE_LLM_API_KEY` is an optional provider-neutral key override. API keys are held as `SecretStr` and are not printed in settings output. Never commit `.env`.
+
+### Retrieval and generation settings
+
+| Variable | Default | Description |
+|---|---|---|
+| `DOCUSCALE_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | FastEmbed dense model |
+| `DOCUSCALE_RERANKER_MODEL` | `BAAI/bge-reranker-base` | FastEmbed cross-encoder |
+| `DOCUSCALE_CHUNK_SIZE` / `DOCUSCALE_CHUNK_OVERLAP` | `200` / `40` | Chunk window and overlap, in whitespace tokens |
+| `DOCUSCALE_CANDIDATE_K` | `20` | Candidates per retriever; also the reranker shortlist size |
+| `DOCUSCALE_RRF_K` | `60` | RRF smoothing constant |
+| `DOCUSCALE_FINAL_TOP_K` | `5` | Chunks passed to generation |
+| `DOCUSCALE_USE_HYDE` | `false` | Enable HyDE query expansion |
+| `DOCUSCALE_LLM_TEMPERATURE` | `0.0` | Deterministic generation by default |
+| `DOCUSCALE_LLM_MAX_TOKENS` | `600` | Answer length cap |
+| `DOCUSCALE_LLM_TIMEOUT` | `60` | Seconds per LLM call |
+
+Prompt templates (`hyde_prompt`, `answer_prompt`) and the refusal sentence (`refusal_message`) are also configurable settings.
+
+---
+
+## Usage
 
 With the virtual environment activated:
 
 ```bash
-python run.py
+python run.py            # standard hybrid retrieval
+python run.py --hyde     # HyDE-expanded dense retrieval
 ```
 
-The verification script performs the complete Phase 1 flow:
+`run.py` indexes a small demo corpus, then runs four end-to-end cases through retrieve → rerank → synthesize:
+
+| Case | Pass condition |
+|---|---|
+| Three in-domain questions | Answer is `grounded` and cites the expected document |
+| One out-of-domain question | Answer is `refused` |
+
+Exit codes: `0` all checks passed, `1` one or more checks failed, `2` LLM authentication failed. Output per question has this shape (values elided):
 
 ```text
-Sample Documents
-       │
-       ▼
-     Chunk
-       │
-       ▼
-    Embed
-       │
-       ▼
- Persist to Qdrant
-       │
-       ▼
- Semantic Queries
-       │
-       ▼
-Similarity Scores
+Q: <question>
+  HyDE passage: <only when HyDE is on and succeeded>
+  Retrieved: <doc#n>, <doc#n>, <doc#n>
+  A: <answer text with [doc#n] citations>
+  cited=[...] unknown=[] grounded=True refused=False
+  -> PASS
 ```
 
-On the first execution, FastEmbed may download the required embedding and reranker models before local inference begins.
+HyDE adds one LLM round trip per query; on rate-limited free tiers, `--hyde` doubles the call count. The first run downloads the embedding and reranker models.
+
+### Programmatic use
+
+```python
+from src.config import load_settings
+from src.generation.llm import LiteLLMClient
+from src.generation.synthesizer import Synthesizer
+from src.retrieval.hyde import HydeExpander
+from src.retrieval.hybrid import HybridRetriever
+from src.storage.vector_store import VectorStore
+
+settings = load_settings()
+llm = LiteLLMClient(settings)
+store = VectorStore(settings)          # after create_collection() / upsert_documents()
+retriever = HybridRetriever(store, settings, hyde=HydeExpander(llm, settings))
+synthesizer = Synthesizer(llm, settings)
+
+question = "What does FATF Recommendation 16 require?"
+result = retriever.retrieve(question, use_hyde=True)    # RetrievalResult
+answer = synthesizer.answer(question, result.hits)      # Answer
+print(answer.answer, answer.grounded, answer.citations)
+```
+
+Call `retriever.refresh_index()` after ingesting new documents so the in-memory BM25 index stays in sync with Qdrant.
 
 ---
 
-## Data Flow
+## Known Limitations
 
-### 1. Ingestion
+- **Citation audit checks existence, not entailment.** A real label attached to an unsupported sentence passes the audit.
+- **BM25 is in-memory.** It is rebuilt from Qdrant at startup and on `refresh_index()`; suited to small and medium corpora.
+- **Whitespace tokens approximate model tokens** for chunk sizing.
+- **Local Qdrant is single-process.** The on-disk store is locked to one process at a time.
+- **Refusal on out-of-domain questions depends on the model following the prompt;** the retriever always returns top-k chunks. Smaller local models may refuse less reliably.
+- **No retrieval benchmark yet.** Quality has been verified with sanity cases, not measured metrics (see Roadmap).
 
-Raw document text enters the ingestion layer.
-
-### 2. Chunking
-
-The custom chunker divides the document into overlapping token-aware segments.
-
-```text
-Document
-─────────────────────────────────────────────
-
-Chunk A
-[───────────────]
-
-       Chunk B
-       [───────────────]
-
-              Chunk C
-              [───────────────]
-```
-
-### 3. Embedding
-
-Each chunk is transformed into a dense vector using:
-
-```text
-FastEmbed
-    ↓
-BAAI/bge-small-en-v1.5
-    ↓
-ONNX inference
-```
-
-### 4. Persistence
-
-The resulting vectors and associated chunk data are stored in local Qdrant:
-
-```text
-./qdrant_data
-```
-
-### 5. Retrieval
-
-A search query is processed by both retrieval paths:
-
-```text
-Query
-  │
-  ├──────────────────────┐
-  │                      │
-  ▼                      ▼
-Dense Retrieval       BM25 Retrieval
-  │                      │
-  ▼                      ▼
-Qdrant Rank List      Sparse Rank List
-  │                      │
-  └──────────┬───────────┘
-             ▼
-      Reciprocal Rank
-        Fusion (k=60)
-             │
-             ▼
-       Candidate Chunks
-             │
-             ▼
-     Cross-Encoder Score
-             │
-             ▼
-       Final Top-K Chunks
-```
-
-The dense path uses the local embedding model and Qdrant cosine-similarity search. The sparse path uses BM25 lexical matching. Their rankings are merged using RRF before Cross-Encoder reranking.
-
----
 ---
 
 ## Roadmap
 
 ### Phase 1 — Ingestion, Embedding & Local Vector Indexing
 
-- [x] Custom token-aware sliding-window chunking
-- [x] Configurable chunk overlap
-- [x] FastEmbed integration
-- [x] `BAAI/bge-small-en-v1.5` ONNX embeddings
-- [x] Local Qdrant persistence
-- [x] Cosine similarity search
-- [x] End-to-end verification script
+- [x] Token-aware sliding-window chunking with configurable overlap
+- [x] FastEmbed `BAAI/bge-small-en-v1.5` ONNX embeddings
+- [x] Local Qdrant persistence and cosine search
 
 ### Phase 2 — Hybrid Retrieval & Cross-Encoder Reranking
 
 - [x] BM25 lexical retrieval
 - [x] Dense vector retrieval
 - [x] Reciprocal Rank Fusion (RRF)
-- [x] Cross-Encoder reranking
-- [x] Multi-stage retrieval verification
+- [x] Cross-encoder reranking
 
-### Phase 3 — Retrieval Quality & Query Expansion
+### Phase 3 — Query Expansion & Grounded Generation
 
-- [ ] HyDE query expansion
-- [ ] Improved retrieval relevance evaluation
-- [ ] Retrieval pipeline optimization
-- [ ] Retrieval benchmark dataset
-- [ ] Recall@K / Precision@K evaluation
-- [ ] MRR / NDCG evaluation
-- [ ] Latency and throughput profiling
+- [x] HyDE query expansion, toggled by `--hyde` / `DOCUSCALE_USE_HYDE`
+- [x] Dense-only HyDE routing with raw-query prepend and graceful fallback
+- [x] Provider-agnostic `ChatModel` Protocol with LiteLLM backend
+- [x] Source-restricted synthesis with `[doc#n]` citations
+- [x] Mechanical citation audit (`grounded` / `unknown_citations`)
+- [x] Deterministic refusal contract
+- [x] `RetrievalResult` retrieval output (`.hits`, `.hyde_passage`)
 
 ### Phase 4 — Production API & Streaming
 
 - [ ] FastAPI service layer
-- [ ] Retrieval API endpoints
-- [ ] Server-Sent Events (SSE) streaming
-- [ ] Streaming retrieval/response pipeline
-- [ ] Production-oriented API configuration
+- [ ] Streaming Server-Sent Events (SSE) answer endpoint
+- [ ] Document ingestion API
+- [ ] Health check endpoint
+- [ ] Pytest suite
+
+### Backlog — Evaluation
+
+- [ ] Retrieval benchmark dataset
+- [ ] Recall@K / Precision@K
+- [ ] MRR / NDCG
+- [ ] Latency and throughput profiling
 
 ---
+
 ## Current Status
 
-**Phase 2 is 100% complete and verified.**
+**Phase 3 is complete and verified.**
 
-DocuScale now provides a local hybrid retrieval foundation:
+DocuScale now provides a full local-retrieval, provider-agnostic-generation pipeline:
 
 ```text
-BM25 Sparse Search
-        +
-Dense Vector Search
-        ↓
-Reciprocal Rank Fusion (RRF, k=60)
-        ↓
-Cross-Encoder Reranking
-        ↓
-Final Top-K Chunks
+[HyDE] → Dense ∥ BM25 → RRF (k=60) → Cross-Encoder → Synthesizer → Citation Audit → Answer
 ```
 
-The project is ready to move into **Phase 3 — Retrieval Quality & Query Expansion**.
+Next: **Phase 4 — Production API & Streaming**.
 
 ---
 
 ## Engineering Principles
 
-DocuScale is being developed around several engineering principles:
-
-### Local-first
-
-Core retrieval functionality should work without mandatory cloud infrastructure.
-
-### Modular
-
-Chunking, storage, configuration, retrieval, and serving should remain independently replaceable components.
-
-### Lightweight
-
-Avoid introducing large dependencies where a focused implementation is sufficient.
-
-### Observable
-
-The pipeline should be easy to inspect from ingestion through retrieval.
-
-### Incremental
-
-Each phase establishes a working foundation for the next instead of introducing the entire RAG stack at once.
+- **Local-first.** Retrieval works without cloud infrastructure; the LLM provider is a configuration choice.
+- **Modular.** Chunking, storage, retrieval, generation, and configuration are independently replaceable.
+- **Lightweight.** No orchestration frameworks; dependencies are added only where a focused implementation is not enough.
+- **Verifiable.** Citations are audited and refusals are deterministic, so behavior can be checked mechanically.
+- **Incremental.** Each phase leaves a working system and a clean commit.
 
 ---
 
