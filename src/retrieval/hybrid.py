@@ -6,7 +6,7 @@ from src.ingestion.chunker import Chunk
 from src.retrieval.bm25 import BM25Index
 from src.retrieval.fusion import reciprocal_rank_fusion
 from src.retrieval.hyde import HydeExpander
-from src.retrieval.reranker import CrossEncoderReranker
+from src.retrieval.reranker import CrossEncoderReranker, Reranker
 from src.storage.vector_store import VectorStore
 
 
@@ -34,14 +34,16 @@ class HybridRetriever:
         self,
         store: VectorStore,
         settings: Settings,
-        reranker: CrossEncoderReranker | None = None,
+        reranker: Reranker | None = None,
         hyde: HydeExpander | None = None,
     ) -> None:
         if settings.use_hyde and hyde is None:
             raise ValueError("settings.use_hyde is true but no HydeExpander was provided")
         self._store = store
         self._settings = settings
-        self._reranker = reranker or CrossEncoderReranker(settings.reranker_model)
+        self._reranker = (
+            reranker if reranker is not None else CrossEncoderReranker(settings.reranker_model)
+        )
         self._hyde = hyde
         self._bm25 = BM25Index(store.get_all_chunks())
 

@@ -1,5 +1,6 @@
-"""Provider-agnostic chat completion via LiteLLM."""
-from typing import Protocol
+"""Provider-agnostic chat completion via LiteLLM (blocking and streaming)."""
+from collections.abc import Iterator
+from typing import Any, Protocol
 
 import litellm
 
@@ -13,6 +14,8 @@ class ChatModel(Protocol):
 
     def complete(self, system: str, user: str, max_tokens: int) -> str: ...
 
+    def stream(self, system: str, user: str, max_tokens: int) -> Iterator[str]: ...
+
 
 class LiteLLMClient:
     """ChatModel backed by LiteLLM (Groq, Ollama, OpenAI, ... chosen by config)."""
@@ -20,10 +23,9 @@ class LiteLLMClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
-    def complete(self, system: str, user: str, max_tokens: int) -> str:
-        """Run one chat completion and return the reply text ("" if empty)."""
+    def _request(self, system: str, user: str, max_tokens: int, stream: bool) -> Any:
         s = self._settings
-        response = litellm.completion(
+        return litellm.completion(
             model=s.llm_model,
             messages=[
                 {"role": "system", "content": system},
@@ -34,5 +36,20 @@ class LiteLLMClient:
             timeout=s.llm_timeout,
             api_key=s.llm_api_key.get_secret_value() if s.llm_api_key else None,
             api_base=s.llm_api_base or None,
+            stream=stream,
         )
+
+    def complete(self, system: str, user: str, max_tokens: int) -> str:
+        """Run one chat completion and return the reply text ("" if empty)."""
+        response = self._request(system, user, max_tokens, stream=False)
         return response.choices[0].message.content or ""
+
+    def stream(self, system: str, user: str, max_tokens: int) -> Iterator[str]:
+        """Yield reply text fragments as the provider produces them.
+
+        The request is sent on the first ``next()``, so connection and auth
+        errors surface there, not when the generator is created.
+        """
+        for chunk in self._request(system, user, max_tokens, stream=True):
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content

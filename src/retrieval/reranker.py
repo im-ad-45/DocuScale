@@ -1,7 +1,15 @@
 """Cross-encoder reranking via FastEmbed (ONNX, CPU-only)."""
+from typing import Protocol
+
 from fastembed.rerank.cross_encoder import TextCrossEncoder
 
 from src.ingestion.chunker import Chunk
+
+
+class Reranker(Protocol):
+    """Anything that scores chunks against a query (higher = more relevant)."""
+
+    def score(self, query: str, chunks: list[Chunk]) -> list[float]: ...
 
 
 class CrossEncoderReranker:

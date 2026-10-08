@@ -1,5 +1,6 @@
 """Grounded answer synthesis with programmatically verified citations."""
 import re
+from collections.abc import Iterator
 
 from pydantic import BaseModel
 
@@ -51,22 +52,34 @@ class Synthesizer:
         self._llm = llm
         self._settings = settings
 
-    def answer(self, question: str, hits: list[HybridHit]) -> Answer:
-        """Answer ``question`` using only ``hits`` as evidence."""
-        refusal = self._settings.refusal_message
-        if not hits:  # nothing retrieved: don't pay for an LLM call that can only guess
-            return Answer(
-                answer=refusal, refused=True, grounded=False,
-                citations=[], unknown_citations=[], sources=[],
-            )
-
+    def _prompt(self, question: str, hits: list[HybridHit]) -> tuple[str, str]:
+        """Return the (system, user) prompts for ``question`` over ``hits``."""
         by_label = {chunk_label(h.chunk): h.chunk for h in hits}
         context = "\n\n".join(f"[{label}]\n{chunk.text}" for label, chunk in by_label.items())
-        text = self._llm.complete(
-            system=self._settings.answer_prompt.format(refusal=refusal),
-            user=f"SOURCES:\n{context}\n\nQUESTION: {question}",
-            max_tokens=self._settings.llm_max_tokens,
-        ).strip()
+        system = self._settings.answer_prompt.format(refusal=self._settings.refusal_message)
+        return system, f"SOURCES:\n{context}\n\nQUESTION: {question}"
+
+    def answer(self, question: str, hits: list[HybridHit]) -> Answer:
+        """Answer ``question`` using only ``hits`` as evidence (blocking)."""
+        if not hits:  # nothing retrieved: don't pay for an LLM call that can only guess
+            return self.audit(self._settings.refusal_message, hits)
+        system, user = self._prompt(question, hits)
+        text = self._llm.complete(system, user, self._settings.llm_max_tokens)
+        return self.audit(text, hits)
+
+    def stream(self, question: str, hits: list[HybridHit]) -> Iterator[str]:
+        """Yield answer text fragments; call :meth:`audit` on the joined text afterwards."""
+        if not hits:
+            yield self._settings.refusal_message
+            return
+        system, user = self._prompt(question, hits)
+        yield from self._llm.stream(system, user, self._settings.llm_max_tokens)
+
+    def audit(self, text: str, hits: list[HybridHit]) -> Answer:
+        """Check ``text``'s citations against ``hits`` and detect refusals."""
+        text = text.strip()
+        by_label = {chunk_label(h.chunk): h.chunk for h in hits}
+        refusal = self._settings.refusal_message
 
         refused = text.strip("\"'").lower().startswith(refusal.lower())
         cited = extract_citations(text)
